@@ -13,8 +13,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy app source
 COPY app/ ./app/
-COPY __init__.py .
-
 # Expose the port uvicorn will run on
 EXPOSE 8000
 
