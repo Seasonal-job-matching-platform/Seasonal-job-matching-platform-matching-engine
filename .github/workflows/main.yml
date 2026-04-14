@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 env:
-  AZURE_WEBAPP_NAME: seasonal-matching-engine  # change this to your exact app name on Azure
+  AZURE_WEBAPP_NAME: Seasonal-job-matching-platform  # change this to your exact app name on Azure
   PYTHON_VERSION: '3.11'
 
 jobs:
