@@ -91,146 +91,120 @@ async def build_index(session: AsyncSession) -> dict:
 
 async def build_user_profile(session: AsyncSession, user_id: int) -> str:
     """
-    Build a textual profile for a user from users/resumes/favorites/jobapplication
-    Uses safe helpers and is resilient to schema variations.
+    Build a textual profile for a user from the actual schema:
+    - users (id, name, country, fields_of_interest, resume_id)
+    - user_fields_of_interest (user_id, fields_of_interest)
+    - resume (id, skills, experience, education, certificates, languages)
+    - resume_skills, resume_experience, resume_education, resume_certificates, resume_languages
+    - user_favorite_jobs (user_id, job_id)
+    - jobapplication (user_id, job_id, created_at)
     """
-    q = text("SELECT * FROM users WHERE id = :uid")
+    q = text("SELECT id, name, country, fields_of_interest, resume_id FROM users WHERE id = :uid")
     row = await safe_execute_fetchone(session, q, {"uid": user_id})
     if not row:
+        logger.warning("User %s not found in DB", user_id)
         return ""
     m = row._mapping
     parts: List[str] = []
 
-    # fields of interest
-    for cand in ("fieldsOfInterest", "fields_of_interest", "fields", "interests"):
-        if cand in m and m.get(cand):
-            parts.append(flatten_value_to_text(m.get(cand)))
-            break
+    # 1. fields_of_interest on users row
+    if m.get("fields_of_interest"):
+        parts.append(flatten_value_to_text(m.get("fields_of_interest")))
 
-    # skills
-    for cand in ("skills", "skillset", "skills_list"):
-        if cand in m and m.get(cand):
-            parts.append(flatten_value_to_text(m.get(cand)))
-            break
-
-    # resume: either id in users.resume or a resume row linked by user_id
+    # 2. user_fields_of_interest junction table
     try:
-        resume_val = None
-        if "resume" in m and m.get("resume"):
-            resume_val = m.get("resume")
-        if resume_val:
-            # if it's an id
-            try:
-                rid = int(resume_val)
-                qres = text("SELECT * FROM resume WHERE id = :rid")
-                rres = await safe_execute_fetchone(session, qres, {"rid": rid})
-                if rres:
-                    rm = rres._mapping
-                    for f in ("skills", "experience", "education", "certificates", "languages"):
-                        if f in rm and rm.get(f):
-                            parts.append(flatten_value_to_text(rm.get(f)))
-            except Exception:
-                # if resume is a json/string blob, flatten it
-                parts.append(flatten_value_to_text(resume_val))
-        else:
-            # try to find resume by user_id
-            qres2 = text("SELECT * FROM resume WHERE user_id = :uid LIMIT 1")
-            rr2 = await safe_execute_fetchone(session, qres2, {"uid": user_id})
-            if rr2:
-                rm = rr2._mapping
-                for f in ("skills", "experience", "education", "certificates", "languages"):
-                    if f in rm and rm.get(f):
-                        parts.append(flatten_value_to_text(rm.get(f)))
+        fi_res = await session.execute(
+            text("SELECT fields_of_interest FROM user_fields_of_interest WHERE user_id = :uid"),
+            {"uid": user_id}
+        )
+        for fi_row in fi_res.fetchall():
+            if fi_row[0]:
+                parts.append(flatten_value_to_text(fi_row[0]))
     except Exception:
-        logger.exception("Error while fetching resume data")
+        logger.exception("Error fetching user_fields_of_interest for user %s", user_id)
 
-    # favorite jobs enrichment (robust parsing)
-    fav_cands = ("favoriteJobs", "favorite_jobs", "favoritejobids", "favoritejobids", "favoritejobs")
-    fav_ids = None
-    for cand in fav_cands:
-        if cand in m and m.get(cand):
-            val = m.get(cand)
-            try:
-                if isinstance(val, (list, tuple)):
-                    fav_ids = [int(x) for x in val if x is not None]
-                elif isinstance(val, int):
-                    fav_ids = [int(val)]
-                elif isinstance(val, str):
-                    s = val.strip()
-                    if s.startswith("[") and s.endswith("]"):
-                        parsed = json.loads(s)
-                        if isinstance(parsed, (list, tuple)):
-                            fav_ids = [int(x) for x in parsed if x is not None]
-                    else:
-                        fav_ids = [int(x.strip()) for x in s.split(",") if x.strip().isdigit()]
-            except Exception:
-                logger.exception("Failed to parse favorite ids value: %r", val)
-            break
-
-    if fav_ids:
+    # 3. resume via users.resume_id
+    resume_id = m.get("resume_id")
+    if resume_id:
         try:
-            # safe: if fav_ids is short, use IN
-            placeholders = ", ".join(str(int(x)) for x in fav_ids)
-            qj = text(f"SELECT * FROM jobs WHERE id IN ({placeholders})")
-            fjobs = await safe_execute_fetchall(session, qj)
-            for fj in fjobs:
-                fm = fj._mapping
-                if fm.get("title"):
-                    parts.append(flatten_value_to_text(fm.get("title")))
-                if fm.get("description"):
-                    parts.append(flatten_value_to_text(fm.get("description")))
+            # main resume row (denormalized columns)
+            rres = await session.execute(
+                text("SELECT skills, experience, education, certificates, languages FROM resume WHERE id = :rid"),
+                {"rid": int(resume_id)}
+            )
+            rrow = rres.fetchone()
+            if rrow:
+                for val in rrow:
+                    if val:
+                        parts.append(flatten_value_to_text(val))
+
+            # normalized resume sub-tables
+            for table, col in [
+                ("resume_skills", "skills"),
+                ("resume_experience", "experience"),
+                ("resume_education", "education"),
+                ("resume_certificates", "certificates"),
+                ("resume_languages", "languages"),
+            ]:
+                sub_res = await session.execute(
+                    text(f"SELECT {col} FROM {table} WHERE resume_id = :rid"),
+                    {"rid": int(resume_id)}
+                )
+                for sub_row in sub_res.fetchall():
+                    if sub_row[0]:
+                        parts.append(flatten_value_to_text(sub_row[0]))
         except Exception:
-            logger.exception("Error enriching profile from favorite jobs")
+            logger.exception("Error fetching resume data for user %s resume_id %s", user_id, resume_id)
 
-    # recently applied jobs enrichment (last 5)
+    # 4. favorite jobs — enrich with job titles/descriptions
     try:
-        # jobapplication table columns might be jobid/JobID/job_id - try common names
-        qapp = text("SELECT jobid FROM applications WHERE userid = :uid ORDER BY createdat DESC LIMIT 5")
-        rows = await safe_execute_fetchall(session, qapp, )
-        # fallback: try lowercase column names or different table name variations if empty
-        if not rows:
-            # attempt alternate column names
-            qapp_alt = text("SELECT job_id FROM applications WHERE user_id = :uid ORDER BY createdat DESC LIMIT 5")
-            rows = await safe_execute_fetchall(session, qapp_alt)
-        if rows:
-            ids = []
-            for r in rows:
-                # row might be a Row object where index 0 contains id
-                try:
-                    val = r[0]
-                    if val is not None:
-                        ids.append(int(val))
-                except Exception:
-                    try:
-                        mapping = getattr(r, "_mapping", None)
-                        if mapping:
-                            for key in ("jobid", "job_id", "jobID"):
-                                if key in mapping and mapping.get(key) is not None:
-                                    ids.append(int(mapping.get(key)))
-                                    break
-                    except Exception:
-                        pass
-            if ids:
-                placeholders = ", ".join(str(int(x)) for x in ids)
-                qj = text(f"SELECT * FROM jobs WHERE id IN ({placeholders})")
-                aj = await safe_execute_fetchall(session, qj)
-                for a in aj:
-                    am = a._mapping
-                    if am.get("title"):
-                        parts.append(flatten_value_to_text(am.get("title")))
-                    if am.get("description"):
-                        parts.append(flatten_value_to_text(am.get("description")))
+        fav_res = await session.execute(
+            text("SELECT job_id FROM user_favorite_jobs WHERE user_id = :uid"),
+            {"uid": user_id}
+        )
+        fav_ids = [r[0] for r in fav_res.fetchall() if r[0] is not None]
+        if fav_ids:
+            placeholders = ", ".join(str(int(x)) for x in fav_ids)
+            fjobs_res = await session.execute(
+                text(f"SELECT title, description FROM jobs WHERE id IN ({placeholders})")
+            )
+            for fj in fjobs_res.fetchall():
+                if fj[0]:
+                    parts.append(flatten_value_to_text(fj[0]))
+                if fj[1]:
+                    parts.append(flatten_value_to_text(fj[1]))
     except Exception:
-        logger.exception("Error enriching profile from jobapplication")
+        logger.exception("Error fetching favorite jobs for user %s", user_id)
 
-    # fallback: use user name if nothing else
+    # 5. recently applied jobs — enrich with job titles/descriptions
+    try:
+        app_res = await session.execute(
+            text("SELECT job_id FROM jobapplication WHERE user_id = :uid ORDER BY created_at DESC LIMIT 5"),
+            {"uid": user_id}
+        )
+        app_ids = [r[0] for r in app_res.fetchall() if r[0] is not None]
+        if app_ids:
+            placeholders = ", ".join(str(int(x)) for x in app_ids)
+            ajobs_res = await session.execute(
+                text(f"SELECT title, description FROM jobs WHERE id IN ({placeholders})")
+            )
+            for aj in ajobs_res.fetchall():
+                if aj[0]:
+                    parts.append(flatten_value_to_text(aj[0]))
+                if aj[1]:
+                    parts.append(flatten_value_to_text(aj[1]))
+    except Exception:
+        logger.exception("Error fetching applied jobs for user %s", user_id)
+
+    # 6. fallback: at minimum use name + country so profile is never empty for existing users
     if not parts:
-        for name_cand in ("name", "full_name", "username"):
-            if name_cand in m and m.get(name_cand):
-                parts.append(str(m.get(name_cand)))
-                break
+        if m.get("name"):
+            parts.append(str(m.get("name")))
+        if m.get("country"):
+            parts.append(str(m.get("country")))
 
     profile = " ".join([p for p in parts if p]).strip()
+    logger.info("Profile for user %s: %r", user_id, profile[:120])
     return normalize_text(profile)
 
 
@@ -289,8 +263,8 @@ async def recommend_for_user(session: AsyncSession, user_id: int, top_n: Optiona
             if dist is None:
                 continue
 
-            # ✅ distance → similarity
-            similarity = 1.0 / (1.0 + float(dist))
+            # IndexFlatIP with L2-normalized vectors returns cosine similarity directly
+            similarity = float(dist)
 
             # ✅ filter on similarity
             if similarity < RECOMMENDER_MIN_SCORE:
