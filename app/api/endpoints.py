@@ -51,7 +51,11 @@ async def get_job(job_id: int, session: AsyncSession = Depends(get_session)):
         "location": m.get("location"),
     }
 
-@router.get("/admin/debug_user_profile/{user_id}")
-async def debug_user_profile(user_id: int, session: AsyncSession = Depends(get_session)):
-    text_profile = await build_user_profile(session, user_id)
-    return {"user_id": user_id, "profile_text": text_profile}
+@router.get("/admin/debug_user_profile_v2/{user_id}")
+async def debug_profile_v2(user_id: int, session: AsyncSession = Depends(get_session)):
+    import traceback
+    try:
+        profile = await build_user_profile(session, user_id)
+        return {"profile": profile}
+    except Exception as e:
+        return {"error": str(e), "trace": traceback.format_exc()}
