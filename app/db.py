@@ -8,7 +8,13 @@ if DATABASE_URL.startswith("postgres://"):
 else:
     ASYNC_DATABASE_URL = DATABASE_URL
 
-engine = create_async_engine(ASYNC_DATABASE_URL, echo=False, future=True, pool_pre_ping=True)
+engine = create_async_engine(
+    ASYNC_DATABASE_URL,
+    echo=False,
+    future=True,
+    pool_pre_ping=True,
+    connect_args={"ssl": "require"}
+)
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 async def get_session() -> AsyncSession:
