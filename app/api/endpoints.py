@@ -59,3 +59,34 @@ async def debug_profile_v2(user_id: int, session: AsyncSession = Depends(get_ses
         return {"profile": profile}
     except Exception as e:
         return {"error": str(e), "trace": traceback.format_exc()}
+
+@router.get("/admin/raw_debug/{user_id}")
+async def raw_debug(user_id: int, session: AsyncSession = Depends(get_session)):
+    import traceback
+    try:
+        r = await session.execute(
+            text("SELECT id, fields_of_interest, resume_id FROM users WHERE id = :uid"),
+            {"uid": user_id}
+        )
+        row = r.fetchone()
+        if not row:
+            return {"error": "user not found"}
+        m = dict(row._mapping)
+        
+        resume_id = m.get("resume_id")
+        resume_row = None
+        if resume_id:
+            r2 = await session.execute(
+                text("SELECT id, skills, experience, education FROM resume WHERE id = :rid"),
+                {"rid": int(resume_id)}
+            )
+            rrow = r2.fetchone()
+            if rrow:
+                resume_row = dict(rrow._mapping)
+        
+        return {
+            "user": {k: str(v) for k, v in m.items()},
+            "resume": {k: str(v) for k, v in resume_row.items()} if resume_row else None
+        }
+    except Exception as e:
+        return {"error": str(e), "trace": traceback.format_exc()}
