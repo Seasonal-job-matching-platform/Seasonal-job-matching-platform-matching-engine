@@ -1,4 +1,5 @@
 # app/recommender/embeddings_index.py
+import asyncio
 from pathlib import Path
 import pickle
 import numpy as np
@@ -7,11 +8,13 @@ from sentence_transformers import SentenceTransformer
 from app.config import RECOMMENDER_CACHE_PATH, EMBEDDING_MODEL_NAME
 import logging
 
+logger = logging.getLogger(__name__)
+
 try:
     import faiss
 except Exception as exc:
     faiss = None
-    logging.warning("FAISS not importable. Install faiss-cpu or request an hnswlib variant. Error: %s", exc)
+    logger.warning("FAISS not importable. Error: %s", exc)
 
 CACHE_DIR = Path(RECOMMENDER_CACHE_PATH)
 INDEX_PATH = CACHE_DIR / "faiss.index"
@@ -19,21 +22,34 @@ JOB_IDS_PATH = CACHE_DIR / "job_ids.pkl"
 JOB_TEXTS_PATH = CACHE_DIR / "job_texts.pkl"
 VECTORS_NPY = CACHE_DIR / "job_vectors.npy"
 
+# Local model path — checked first, falls back to downloading from HuggingFace
+_LOCAL_MODEL_DIR = Path(__file__).resolve().parent.parent / "model_cache"
+
 _model = None
+
 
 def _get_model():
     global _model
     if _model is None:
-        _model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+        # Use bundled model if it exists, otherwise download
+        if _LOCAL_MODEL_DIR.exists() and any(_LOCAL_MODEL_DIR.iterdir()):
+            logger.info("Loading model from local cache: %s", _LOCAL_MODEL_DIR)
+            _model = SentenceTransformer(str(_LOCAL_MODEL_DIR))
+        else:
+            logger.info("Local model not found, downloading %s from HuggingFace", EMBEDDING_MODEL_NAME)
+            _model = SentenceTransformer(EMBEDDING_MODEL_NAME)
     return _model
+
 
 def _ensure_cache_dir():
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-async def build_index_from_texts(job_texts: List[str], job_ids: List[int]) -> dict:
+
+def _build_index_sync(job_texts: List[str], job_ids: List[int]) -> dict:
+    """Synchronous index build — runs in a thread pool to avoid blocking the event loop."""
     _ensure_cache_dir()
     if faiss is None:
-        raise RuntimeError("faiss not available. Install faiss-cpu or request hnswlib variant.")
+        raise RuntimeError("faiss not available. Install faiss-cpu.")
 
     if len(job_texts) == 0:
         with open(JOB_IDS_PATH, "wb") as f:
@@ -57,6 +73,13 @@ async def build_index_from_texts(job_texts: List[str], job_ids: List[int]) -> di
     np.save(VECTORS_NPY, embs)
     return {"status": "indexed", "count": len(job_ids)}
 
+
+async def build_index_from_texts(job_texts: List[str], job_ids: List[int]) -> dict:
+    """Async wrapper — offloads the CPU-heavy encode to a thread."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _build_index_sync, job_texts, job_ids)
+
+
 def load_index() -> Tuple[Optional[object], Optional[List[int]], Optional[List[str]]]:
     _ensure_cache_dir()
     if faiss is None:
@@ -72,7 +95,9 @@ def load_index() -> Tuple[Optional[object], Optional[List[int]], Optional[List[s
             job_texts = pickle.load(f)
     return index, job_ids, job_texts
 
-def query_index(user_text: str, top_k: int = 50) -> Tuple[np.ndarray, np.ndarray]:
+
+def _query_index_sync(user_text: str, top_k: int = 50) -> Tuple[np.ndarray, np.ndarray]:
+    """Synchronous query — runs in a thread pool to avoid blocking the event loop."""
     if faiss is None:
         raise RuntimeError("faiss not available.")
     index, job_ids, job_texts = load_index()
@@ -83,3 +108,9 @@ def query_index(user_text: str, top_k: int = 50) -> Tuple[np.ndarray, np.ndarray
     faiss.normalize_L2(emb)
     D, I = index.search(emb, top_k)
     return D[0], I[0]
+
+
+async def query_index(user_text: str, top_k: int = 50) -> Tuple[np.ndarray, np.ndarray]:
+    """Async wrapper — offloads encode + FAISS search to a thread."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _query_index_sync, user_text, top_k)

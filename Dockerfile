@@ -11,10 +11,11 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy app source
+# Copy app source and bundled model
 COPY app/ ./app/
-# Expose the port uvicorn will run on
+COPY startup.sh .
+RUN chmod +x startup.sh
+
 EXPOSE 8000
 
-# Run the FastAPI app
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["./startup.sh"]

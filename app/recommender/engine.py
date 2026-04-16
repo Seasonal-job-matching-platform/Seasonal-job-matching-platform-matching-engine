@@ -238,7 +238,7 @@ async def recommend_for_user(session: AsyncSession, user_id: int, top_n: Optiona
         return []
 
     try:
-        D, I = query_index(user_text, top_k=50)
+        D, I = await query_index(user_text, top_k=50)
     except Exception as e:
         logger.exception("Error querying embedding index: %s", e)
         return []
