@@ -17,6 +17,15 @@ except Exception:
 
 async def build_index_background():
     try:
+        from app.recommender.embeddings_index import load_index
+        idx, _, _ = load_index()
+        if idx is not None:
+            logger.info("Existing index found in cache — skipping rebuild")
+            return
+    except Exception:
+        pass  # index doesn't exist or is corrupt, rebuild it
+
+    try:
         async with AsyncSessionLocal() as session:
             await build_index(session)
         logger.info("Index built successfully")
