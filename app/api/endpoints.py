@@ -1,42 +1,149 @@
+# # app/api/endpoints.py
+# from fastapi import APIRouter, Depends, HTTPException
+# from sqlalchemy.ext.asyncio import AsyncSession
+# from sqlalchemy import text
+# from fastapi.responses import JSONResponse
+
+# from app.db import get_session
+# from app.recommender.engine import build_index, recommend_for_user, fetch_jobs_by_ids, build_user_profile
+
+# router = APIRouter()
+
+# @router.post("/admin/index", summary="(Admin) Build or rebuild FAISS index")
+# async def admin_index(session: AsyncSession = Depends(get_session)):
+#     res = await build_index(session)
+#     return JSONResponse(res)
+
+# @router.get("/recommend/{user_id}", summary="Get recommendations for a user")
+# async def api_recommend(user_id: int, n: int = 5, session: AsyncSession = Depends(get_session)):
+#     recs = await recommend_for_user(session, user_id, top_n=n)
+#     if not recs:
+#         return {"user_id": user_id, "recommendations": []}
+#     ids = [r[0] for r in recs]
+#     jobs = await fetch_jobs_by_ids(session, ids)
+#     score_map = {r[0]: r[1] for r in recs}
+#     out = []
+#     for j in jobs:
+#         out.append({
+#             "id": j.get("id"),
+#             "title": j.get("title"),
+#             "description": j.get("description"),
+#             "score": round(score_map.get(j.get("id"), 0.0), 4)
+#         })
+#     out_sorted = sorted(out, key=lambda x: -x["score"])
+#     return {"user_id": user_id, "recommendations": out_sorted}
+
+# @router.get("/jobs/{job_id}", summary="Get job details")
+# async def get_job(job_id: int, session: AsyncSession = Depends(get_session)):
+#     q = text("SELECT * FROM jobs WHERE id = :jid")
+#     res = await session.execute(q, {"jid": job_id})
+#     row = res.fetchone()
+#     if not row:
+#         raise HTTPException(status_code=404, detail="Job not found")
+#     m = row._mapping
+#     return {
+#         "id": int(m.get("id")),
+#         "title": m.get("title"),
+#         "description": m.get("description"),
+#         "categories": m.get("categories"),
+#         "requirements": m.get("requirements"),
+#         "benefits": m.get("benefits"),
+#         "location": m.get("location"),
+#     }
+
+# @router.get("/admin/debug_user_profile_v2/{user_id}")
+# async def debug_profile_v2(user_id: int, session: AsyncSession = Depends(get_session)):
+#     import traceback
+#     try:
+#         profile = await build_user_profile(session, user_id)
+#         return {"profile": profile}
+#     except Exception as e:
+#         return {"error": str(e), "trace": traceback.format_exc()}
+
+# @router.get("/admin/raw_debug/{user_id}")
+# async def raw_debug(user_id: int, session: AsyncSession = Depends(get_session)):
+#     import traceback
+#     try:
+#         r = await session.execute(
+#             text("SELECT id, fields_of_interest, resume_id FROM users WHERE id = :uid"),
+#             {"uid": user_id}
+#         )
+#         row = r.fetchone()
+#         if not row:
+#             return {"error": "user not found"}
+#         m = dict(row._mapping)
+        
+#         resume_id = m.get("resume_id")
+#         resume_row = None
+#         if resume_id:
+#             r2 = await session.execute(
+#                 text("SELECT id, skills, experience, education FROM resume WHERE id = :rid"),
+#                 {"rid": int(resume_id)}
+#             )
+#             rrow = r2.fetchone()
+#             if rrow:
+#                 resume_row = dict(rrow._mapping)
+        
+#         return {
+#             "user": {k: str(v) for k, v in m.items()},
+#             "resume": {k: str(v) for k, v in resume_row.items()} if resume_row else None
+#         }
+#     except Exception as e:
+#         return {"error": str(e), "trace": traceback.format_exc()}
 # app/api/endpoints.py
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
-from fastapi.responses import JSONResponse
-
-from app.db import get_session
-from app.recommender.engine import build_index, recommend_for_user, fetch_jobs_by_ids, build_user_profile
+from app.db import get_session, AsyncSessionLocal
+from app.recommender.engine import (
+    build_index, recommend_for_user,
+    fetch_jobs_by_ids, build_user_profile
+)
 
 router = APIRouter()
 
-@router.post("/admin/index", summary="(Admin) Build or rebuild FAISS index")
-async def admin_index(session: AsyncSession = Depends(get_session)):
-    res = await build_index(session)
-    return JSONResponse(res)
+# background-safe index builder
+async def background_build_index():
+    async with AsyncSessionLocal() as session:
+        await build_index(session)
 
-@router.get("/recommend/{user_id}", summary="Get recommendations for a user")
-async def api_recommend(user_id: int, n: int = 5, session: AsyncSession = Depends(get_session)):
+@router.post("/admin/index", summary="(Admin) Build or rebuild FAISS index")
+async def admin_index(background_tasks: BackgroundTasks):
+    background_tasks.add_task(background_build_index)
+    return {"status": "index building started"}
+
+@router.get("/recommend/{user_id}")
+async def api_recommend(
+    user_id: int,
+    n: int = 5,
+    session: AsyncSession = Depends(get_session)
+):
     recs = await recommend_for_user(session, user_id, top_n=n)
     if not recs:
         return {"user_id": user_id, "recommendations": []}
     ids = [r[0] for r in recs]
     jobs = await fetch_jobs_by_ids(session, ids)
     score_map = {r[0]: r[1] for r in recs}
-    out = []
-    for j in jobs:
-        out.append({
-            "id": j.get("id"),
-            "title": j.get("title"),
-            "description": j.get("description"),
-            "score": round(score_map.get(j.get("id"), 0.0), 4)
-        })
-    out_sorted = sorted(out, key=lambda x: -x["score"])
-    return {"user_id": user_id, "recommendations": out_sorted}
+    out = [
+        {
+            "id": j["id"],
+            "title": j["title"],
+            "description": j["description"],
+            "score": round(score_map.get(j["id"], 0.0), 4)
+        }
+        for j in jobs
+    ]
+    return {
+        "user_id": user_id,
+        "recommendations": sorted(out, key=lambda x: -x["score"])
+    }
 
-@router.get("/jobs/{job_id}", summary="Get job details")
+@router.get("/jobs/{job_id}")
 async def get_job(job_id: int, session: AsyncSession = Depends(get_session)):
-    q = text("SELECT * FROM jobs WHERE id = :jid")
-    res = await session.execute(q, {"jid": job_id})
+    res = await session.execute(
+        text("SELECT * FROM jobs WHERE id = :jid"),
+        {"jid": job_id}
+    )
     row = res.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -45,48 +152,4 @@ async def get_job(job_id: int, session: AsyncSession = Depends(get_session)):
         "id": int(m.get("id")),
         "title": m.get("title"),
         "description": m.get("description"),
-        "categories": m.get("categories"),
-        "requirements": m.get("requirements"),
-        "benefits": m.get("benefits"),
-        "location": m.get("location"),
     }
-
-@router.get("/admin/debug_user_profile_v2/{user_id}")
-async def debug_profile_v2(user_id: int, session: AsyncSession = Depends(get_session)):
-    import traceback
-    try:
-        profile = await build_user_profile(session, user_id)
-        return {"profile": profile}
-    except Exception as e:
-        return {"error": str(e), "trace": traceback.format_exc()}
-
-@router.get("/admin/raw_debug/{user_id}")
-async def raw_debug(user_id: int, session: AsyncSession = Depends(get_session)):
-    import traceback
-    try:
-        r = await session.execute(
-            text("SELECT id, fields_of_interest, resume_id FROM users WHERE id = :uid"),
-            {"uid": user_id}
-        )
-        row = r.fetchone()
-        if not row:
-            return {"error": "user not found"}
-        m = dict(row._mapping)
-        
-        resume_id = m.get("resume_id")
-        resume_row = None
-        if resume_id:
-            r2 = await session.execute(
-                text("SELECT id, skills, experience, education FROM resume WHERE id = :rid"),
-                {"rid": int(resume_id)}
-            )
-            rrow = r2.fetchone()
-            if rrow:
-                resume_row = dict(rrow._mapping)
-        
-        return {
-            "user": {k: str(v) for k, v in m.items()},
-            "resume": {k: str(v) for k, v in resume_row.items()} if resume_row else None
-        }
-    except Exception as e:
-        return {"error": str(e), "trace": traceback.format_exc()}
