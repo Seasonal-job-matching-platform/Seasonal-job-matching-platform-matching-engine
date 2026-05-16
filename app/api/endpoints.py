@@ -91,7 +91,9 @@
 #     except Exception as e:
 #         return {"error": str(e), "trace": traceback.format_exc()}
 # app/api/endpoints.py
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+
+import os
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 from app.db import get_session, AsyncSessionLocal
@@ -99,6 +101,11 @@ from app.recommender.engine import (
     build_index, recommend_for_user,
     fetch_jobs_by_ids, build_user_profile
 )
+REBUILD_SECRET = os.getenv("REBUILD_SECRET")
+
+
+
+
 
 router = APIRouter()
 
@@ -111,6 +118,22 @@ async def background_build_index():
 async def admin_index(background_tasks: BackgroundTasks):
     background_tasks.add_task(background_build_index)
     return {"status": "index building started"}
+
+
+
+@router.post("/internal/rebuild-index")
+async def rebuild_index(
+    background_tasks: BackgroundTasks,
+    authorization: str = Header(...)
+):
+    if authorization != f"Bearer {REBUILD_SECRET}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    background_tasks.add_task(background_build_index)
+    return {"status": "rebuild started"}
+
+
+
+
 
 @router.get("/recommend/{user_id}")
 async def api_recommend(
