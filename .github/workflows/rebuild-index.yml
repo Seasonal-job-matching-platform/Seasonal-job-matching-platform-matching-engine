@@ -1,27 +1,41 @@
-# .github/workflows/rebuild-index.yml
 name: Rebuild Matching Engine Index
-
 on:
   schedule:
-    - cron: '0 */6 * * *'   # Every 6 hours (00:00, 06:00, 12:00, 18:00 UTC)
-  workflow_dispatch:          # Allow manual trigger from GitHub UI
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
 
 jobs:
   rebuild:
     runs-on: ubuntu-latest
     steps:
+      - name: Check secret is set
+        run: |
+          if [ -z "${{ secrets.AZURE_WEBAPP_NAME }}" ]; then
+            echo "ERROR: AZURE_WEBAPP_NAME secret is empty or not set"
+            exit 1
+          fi
+          echo "AZURE_WEBAPP_NAME is set"
+
+      - name: Test DNS resolution
+        run: |
+          nslookup ${{ secrets.AZURE_WEBAPP_NAME }}.azurewebsites.net \
+            && echo "DNS OK" \
+            || (echo "DNS FAILED - check AZURE_WEBAPP_NAME value" && exit 1)
+
       - name: Trigger index rebuild
         run: |
-          response=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+          response=$(curl -s -o /tmp/response_body.txt -w "%{http_code}" -X POST \
             https://${{ secrets.AZURE_WEBAPP_NAME }}.azurewebsites.net/internal/rebuild-index \
             -H "Authorization: Bearer ${{ secrets.REBUILD_SECRET }}" \
-            -H "Content-Type: application/json")
-          
+            -H "Content-Type: application/json" \
+            --max-time 30)
+
           echo "Response code: $response"
-          
+          echo "Response body: $(cat /tmp/response_body.txt)"
+
           if [ "$response" != "200" ]; then
             echo "Rebuild failed with status $response"
             exit 1
           fi
-          
+
           echo "Rebuild triggered successfully"
