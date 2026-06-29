@@ -98,7 +98,7 @@ async def embed_job(heroku: AsyncSession, supabase: AsyncSession, job_id: int) -
     await supabase.execute(
         text("""
             INSERT INTO job_embeddings (job_id, embedding, updated_at)
-            VALUES (:job_id, :emb::vector(384), now())
+            VALUES (:job_id, CAST(:emb AS vector(384)), now())
             ON CONFLICT (job_id) DO UPDATE
             SET embedding = EXCLUDED.embedding, updated_at = now()
         """),
@@ -143,7 +143,7 @@ async def backfill_embeddings(heroku: AsyncSession, supabase: AsyncSession) -> i
             await supabase.execute(
                 text("""
                     INSERT INTO job_embeddings (job_id, embedding, updated_at)
-                    VALUES (:job_id, :emb::vector(384), now())
+                    VALUES (:job_id, CAST(:emb AS vector(384)), now())
                     ON CONFLICT (job_id) DO UPDATE
                     SET embedding = EXCLUDED.embedding, updated_at = now()
                 """),
@@ -179,7 +179,7 @@ async def recommend_for_user(
 
     res = await supabase.execute(
         text("""
-            WITH q AS (SELECT :uvec::vector(384) AS v)
+            WITH q AS (SELECT CAST(:uvec AS vector(384)) AS v)
             SELECT je.job_id, 1 - (je.embedding <=> q.v) AS score
             FROM job_embeddings je, q
             ORDER BY je.embedding <=> q.v
