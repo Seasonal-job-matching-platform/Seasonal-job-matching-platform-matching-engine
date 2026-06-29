@@ -140,15 +140,16 @@ async def backfill_embeddings(heroku: AsyncSession, supabase: AsyncSession) -> i
 
             vecs = await encode_batch([t for _, t in items])
 
-            await supabase.execute(
-                text("""
-                    INSERT INTO job_embeddings (job_id, embedding, updated_at)
-                    VALUES (:job_id, CAST(:emb AS vector(384)), now())
-                    ON CONFLICT (job_id) DO UPDATE
-                    SET embedding = EXCLUDED.embedding, updated_at = now()
-                """),
-                [{"job_id": jid, "emb": _vec_to_pg(vec)} for (jid, _), vec in zip(items, vecs)]
-            )
+            for (jid, _), vec in zip(items, vecs):
+                await supabase.execute(
+                    text("""
+                        INSERT INTO job_embeddings (job_id, embedding, updated_at)
+                        VALUES (:job_id, CAST(:emb AS vector(384)), now())
+                        ON CONFLICT (job_id) DO UPDATE
+                        SET embedding = EXCLUDED.embedding, updated_at = now()
+                    """),
+                    {"job_id": jid, "emb": _vec_to_pg(vec)}
+                )
             await supabase.commit()
             count += len(items)
             logger.info("Backfill progress: %d/%d", count, len(missing_ids))
