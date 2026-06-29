@@ -5,6 +5,8 @@ from app.config import DATABASE_URL, SUPABASE_DATABASE_URL
 def _make_async_url(url: str) -> str:
     if url.startswith("postgres://"):
         return url.replace("postgres://", "postgresql+asyncpg://", 1)
+    if url.startswith("postgresql://"):
+        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
     return url
 
 
