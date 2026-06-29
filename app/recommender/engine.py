@@ -5,7 +5,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.recommender.utils import flatten_value_to_text, normalize_text
-from app.recommender.embedder import encode
+from app.recommender.embedder import encode, encode_batch
 from app.config import RECOMMENDER_MIN_SCORE, RECOMMENDER_TOP_N
 
 logger = logging.getLogger(__name__)
@@ -108,6 +108,9 @@ async def embed_job(heroku: AsyncSession, supabase: AsyncSession, job_id: int) -
     logger.info("Embedded job %s", job_id)
 
 
+_BACKFILL_BATCH_SIZE = 64
+
+
 async def backfill_embeddings(heroku: AsyncSession, supabase: AsyncSession) -> int:
     embedded_res = await supabase.execute(text("SELECT job_id FROM job_embeddings"))
     embedded_ids = {r[0] for r in embedded_res.fetchall()}
@@ -117,12 +120,41 @@ async def backfill_embeddings(heroku: AsyncSession, supabase: AsyncSession) -> i
 
     logger.info("Backfilling %d jobs without embeddings", len(missing_ids))
     count = 0
-    for job_id in missing_ids:
+
+    for i in range(0, len(missing_ids), _BACKFILL_BATCH_SIZE):
+        batch_ids = missing_ids[i:i + _BACKFILL_BATCH_SIZE]
         try:
-            await embed_job(heroku, supabase, job_id)
-            count += 1
+            rows = await safe_execute_fetchall(
+                heroku,
+                text(f"SELECT * FROM jobs WHERE id IN ({', '.join(map(str, batch_ids))})")
+            )
+
+            items = []
+            for row in rows:
+                job_text = await build_job_text_from_row(dict(row._mapping))
+                if job_text:
+                    items.append((int(row._mapping["id"]), job_text))
+
+            if not items:
+                continue
+
+            vecs = await encode_batch([t for _, t in items])
+
+            await supabase.execute(
+                text("""
+                    INSERT INTO job_embeddings (job_id, embedding, updated_at)
+                    VALUES (:job_id, :emb::vector(384), now())
+                    ON CONFLICT (job_id) DO UPDATE
+                    SET embedding = EXCLUDED.embedding, updated_at = now()
+                """),
+                [{"job_id": jid, "emb": _vec_to_pg(vec)} for (jid, _), vec in zip(items, vecs)]
+            )
+            await supabase.commit()
+            count += len(items)
+            logger.info("Backfill progress: %d/%d", count, len(missing_ids))
+
         except Exception:
-            logger.exception("Failed to embed job %s during backfill", job_id)
+            logger.exception("Failed to process backfill batch at index %d", i)
 
     logger.info("Backfill complete: %d/%d jobs embedded", count, len(missing_ids))
     return count

@@ -27,9 +27,19 @@ def _encode_sync(text: str) -> list[float]:
     return vec[0].tolist()
 
 
+def _encode_batch_sync(texts: list[str]) -> list[list[float]]:
+    vecs = _get_model().encode(texts, convert_to_numpy=True, normalize_embeddings=True)
+    return vecs.tolist()
+
+
 async def encode(text: str) -> list[float]:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _encode_sync, text)
+
+
+async def encode_batch(texts: list[str]) -> list[list[float]]:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _encode_batch_sync, texts)
 
 
 def warmup() -> None:
