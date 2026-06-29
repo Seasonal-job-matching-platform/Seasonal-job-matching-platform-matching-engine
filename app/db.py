@@ -1,70 +1,56 @@
-# # app/db.py
-# from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-# from app.config import DATABASE_URL
-
-# # Convert classic postgres URL to asyncpg dialect if needed
-# if DATABASE_URL.startswith("postgres://"):
-#     ASYNC_DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
-# else:
-#     ASYNC_DATABASE_URL = DATABASE_URL
-
-# engine = create_async_engine(
-#     ASYNC_DATABASE_URL,
-#     echo=False,
-#     future=True,
-#     pool_pre_ping=True,
-#     pool_size=3,
-#     max_overflow=2,
-#     connect_args={"ssl": "require"}
-# )
-# AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
-
-# async def get_session() -> AsyncSession:
-#     async with AsyncSessionLocal() as session:
-#         yield session
-# app/db.py
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy.pool import NullPool
-from app.config import DATABASE_URL
-
-# Convert postgres:// → postgresql+asyncpg://
-if DATABASE_URL.startswith("postgres://"):
-    ASYNC_DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
-else:
-    ASYNC_DATABASE_URL = DATABASE_URL
+from app.config import DATABASE_URL, SUPABASE_DATABASE_URL
 
 
-# ✅ ENGINE CONFIG (Azure-friendly)
+def _make_async_url(url: str) -> str:
+    if url.startswith("postgres://"):
+        return url.replace("postgres://", "postgresql+asyncpg://", 1)
+    return url
+
+
+# Heroku Postgres — app data (users, jobs, applications)
 engine = create_async_engine(
-    ASYNC_DATABASE_URL,
+    _make_async_url(DATABASE_URL),
     echo=False,
     future=True,
-
-    # --- Connection Pooling ---
-    pool_size=5,           # steady connections
-    max_overflow=10,       # burst capacity
-    pool_timeout=30,       # wait time before failing
-    pool_recycle=1800,     # recycle every 30 min (avoids stale Azure connections)
-    pool_pre_ping=True,    # validates connections before use
-
-    # --- Azure SSL ---
+    pool_size=5,
+    max_overflow=10,
+    pool_timeout=30,
+    pool_recycle=1800,
+    pool_pre_ping=True,
     connect_args={"ssl": "require"},
 )
 
+AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
-# ✅ Session factory
-AsyncSessionLocal = async_sessionmaker(
-    engine,
-    expire_on_commit=False,
-    class_=AsyncSession
+
+# Supabase Postgres — vector embeddings only
+supabase_engine = create_async_engine(
+    _make_async_url(SUPABASE_DATABASE_URL),
+    echo=False,
+    future=True,
+    pool_size=3,
+    max_overflow=5,
+    pool_timeout=30,
+    pool_recycle=1800,
+    pool_pre_ping=True,
+    connect_args={"ssl": "require"},
 )
 
+SupabaseSessionLocal = async_sessionmaker(supabase_engine, expire_on_commit=False, class_=AsyncSession)
 
-# ✅ Dependency (ensures connections are released properly)
+
 async def get_session() -> AsyncSession:
     async with AsyncSessionLocal() as session:
         try:
             yield session
         finally:
-            # Explicit close (extra safety)
+            await session.close()
+
+
+async def get_supabase_session() -> AsyncSession:
+    async with SupabaseSessionLocal() as session:
+        try:
+            yield session
+        finally:
             await session.close()
